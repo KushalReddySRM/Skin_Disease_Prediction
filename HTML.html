@@ -29,9 +29,34 @@
             reader.readAsDataURL(event.target.files[0]);
         }
 
-        function classifyImage() {
-            document.getElementById('result').innerText = "Processing...";
-            // TODO: Connect to backend API for classification
+        async function classifyImage() {
+            const fileInput = document.getElementById('imageUpload');
+            const resultElement = document.getElementById('result');
+            
+            if (fileInput.files.length === 0) {
+                resultElement.innerText = "Please upload an image first!";
+                return;
+            }
+            
+            resultElement.innerText = "Processing...";
+            const formData = new FormData();
+            formData.append("file", fileInput.files[0]);
+            
+            try {
+                const response = await fetch("http://127.0.0.1:8000/predict", {
+                    method: "POST",
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error("Error in classification");
+                }
+                
+                const data = await response.json();
+                resultElement.innerText = "Predicted Disease: " + data.prediction;
+            } catch (error) {
+                resultElement.innerText = "Error: " + error.message;
+            }
         }
     </script>
 </body>
