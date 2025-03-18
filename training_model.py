@@ -1,3 +1,8 @@
+# Install PyTorch if it's not already installed
+!pip install torch torchvision torchaudio
+
+%matplotlib inline
+
 import os
 import torch
 import torch.nn as nn
@@ -8,17 +13,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report
 import numpy as np
+from PIL import Image  # Added for prediction on single image
 
-# Define dataset paths
-train_path = r"skin_disease_dataset\train_set"
-test_path = r"skin_disease_dataset\test_set"
+# Define the paths to your dataset
+train_path = r"C:\Users\chill\Desktop\Minor Project\archive\skin_disease_dataset\train_set"
+test_path = r"C:\Users\chill\Desktop\Minor Project\archive\skin_disease_dataset\test_set"
 
-# Ensure dataset paths exist
-for path in [train_path, test_path]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Directory not found: {path}")
+# Check if the paths exist
+if not os.path.exists(train_path):
+    raise FileNotFoundError(f"Train directory not found: {train_path}")
+if not os.path.exists(test_path):
+    raise FileNotFoundError(f"Test directory not found: {test_path}")
 
-# Data transformations
+# Data augmentation and normalization for training
 data_transforms = {
     'train': transforms.Compose([
         transforms.Resize((260, 260)),
@@ -34,50 +41,42 @@ data_transforms = {
     ]),
 }
 
-# Load datasets
+# Load the datasets
 image_datasets = {
-    'train': datasets.ImageFolder(train_path, transform=data_transforms['train']),
-    'val': datasets.ImageFolder(test_path, transform=data_transforms['val'])
+    'train': datasets.ImageFolder(train_path, data_transforms['train']),
+    'val': datasets.ImageFolder(test_path, data_transforms['val'])
 }
-
-# Dataloaders with optimizations
 dataloaders = {
-    phase: torch.utils.data.DataLoader(
-        image_datasets[phase], batch_size=64, shuffle=(phase == 'train'),
-        num_workers=4, pin_memory=True
-    )
-    for phase in ['train', 'val']
+    'train': torch.utils.data.DataLoader(image_datasets['train'], batch_size=64, shuffle=True),
+    'val': torch.utils.data.DataLoader(image_datasets['val'], batch_size=64, shuffle=False)
 }
-
-# Dataset size and class info
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
 num_classes = len(class_names)
 
-# Load EfficientNetB2 model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Load the EfficientNetB2 model
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = models.efficientnet_b2(weights="EfficientNet_B2_Weights.IMAGENET1K_V1")
 model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
 model = model.to(device)
 
-# Loss function, optimizer, and learning rate scheduler
+# Define loss function, optimizer, and scheduler
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
 
-# Mixed precision training for speedup
-scaler = torch.cuda.amp.GradScaler()
-
-
 # Training function
-def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
+def train_model(model, criterion, optimizer, scheduler, num_epochs=100):
     history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
-
     for epoch in range(num_epochs):
-        print(f"Epoch {epoch+1}/{num_epochs}\n" + "-" * 10)
+        print(f"Epoch {epoch+1}/{num_epochs}")
+        print("-" * 10)
 
         for phase in ['train', 'val']:
-            model.train() if phase == 'train' else model.eval()
+            if phase == 'train':
+                model.train()
+            else:
+                model.eval()
 
             running_loss = 0.0
             running_corrects = 0
@@ -86,96 +85,139 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
                 inputs, labels = inputs.to(device), labels.to(device)
 
                 optimizer.zero_grad()
-
-                with torch.set_grad_enabled(phase == 'train'), torch.cuda.amp.autocast():
+                with torch.set_grad_enabled(phase == 'train'):
                     outputs = model(inputs)
+                    _, preds = torch.max(outputs, 1)
                     loss = criterion(outputs, labels)
-                    preds = torch.argmax(outputs, dim=1)
-
-                if phase == 'train':
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels).item()
+                running_corrects += torch.sum(preds == labels.data)
 
             epoch_loss = running_loss / dataset_sizes[phase]
-            epoch_acc = running_corrects / dataset_sizes[phase]
+            epoch_acc = (running_corrects.double() / dataset_sizes[phase]).cpu().numpy()
 
             history[f"{phase}_loss"].append(epoch_loss)
             history[f"{phase}_acc"].append(epoch_acc)
 
             print(f"{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}")
 
-        scheduler.step()
+            if phase == 'train':
+                scheduler.step()
 
     return model, history
 
-
 # Train the model
-model, history = train_model(model, criterion, optimizer, scheduler, num_epochs=10)
+model, history = train_model(model, criterion, optimizer, scheduler, num_epochs=100)
 
-# Plot training results
+# Plot training and validation loss
 plt.figure(figsize=(12, 5))
-
 plt.subplot(1, 2, 1)
-plt.plot(history['train_loss'], label='Train Loss')
-plt.plot(history['val_loss'], label='Val Loss')
+plt.plot(history['train_loss'], label='Training Loss')
+plt.plot(history['val_loss'], label='Validation Loss')
+plt.title('Training and Validation Loss')
 plt.xlabel('Epochs')
 plt.ylabel('Loss')
-plt.title('Loss Over Epochs')
 plt.legend()
 
+# Plot training and validation accuracy
 plt.subplot(1, 2, 2)
-plt.plot(history['train_acc'], label='Train Accuracy')
-plt.plot(history['val_acc'], label='Val Accuracy')
+plt.plot(history['train_acc'], label='Training Accuracy')
+plt.plot(history['val_acc'], label='Validation Accuracy')
+plt.title('Training and Validation Accuracy')
 plt.xlabel('Epochs')
 plt.ylabel('Accuracy')
-plt.title('Accuracy Over Epochs')
 plt.legend()
 
 plt.tight_layout()
 plt.show()
 
-# Model evaluation function
-def evaluate_model(model, dataloader):
-    model.eval()
-    correct = 0
-    total = 0
-    y_pred, y_true = [], []
+# Set model to evaluation mode
+model.eval()
 
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
+# Initialize counters for accuracy calculation
+correct = 0
+total = 0
 
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+# Turn off gradients for validation/testing
+with torch.no_grad():
+    for inputs, labels in dataloaders['val']:
+        inputs, labels = inputs.to(device), labels.to(device)
+        
+        # Forward pass
+        outputs = model(inputs)
+        _, predicted = torch.max(outputs, 1)
+        
+        # Count correct predictions
+        correct += (predicted == labels).sum().item()
+        total += labels.size(0)
 
-            y_pred.extend(preds.cpu().numpy())
-            y_true.extend(labels.cpu().numpy())
-
-    accuracy = correct / total * 100
-    return accuracy, y_true, y_pred
-
-
-# Validate and print accuracy
-val_accuracy, y_true, y_pred = evaluate_model(model, dataloaders['val'])
-print(f"Validation Accuracy: {val_accuracy:.2f}%")
+# Calculate accuracy
+accuracy = correct / total * 100
+print(f"Validation Accuracy: {accuracy:.2f}%")
 
 # Save the model
-torch.save(model.state_dict(), 'optimized_skin_disease_model.pth')
-print("Model saved as optimized_skin_disease_model.pth")
+torch.save(model.state_dict(), 'skin_disease_efficientnetB2_model.pth')
+print("Model saved as skin_disease_efficientnetB2_model.pth")
 
-# Confusion matrix and classification report
+# Evaluate on test set and create confusion matrix
+model.eval()
+y_pred = []
+y_true = []
+
+with torch.no_grad():
+    for inputs, labels in dataloaders['val']:
+        inputs, labels = inputs.to(device), labels.to(device)
+        outputs = model(inputs)
+        _, preds = torch.max(outputs, 1)
+        y_pred.extend(preds.cpu().numpy())
+        y_true.extend(labels.cpu().numpy())
+
+# Confusion matrix
 cm = confusion_matrix(y_true, y_pred)
 plt.figure(figsize=(10, 7))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
 plt.title('Confusion Matrix')
-plt.xlabel('Predicted')
-plt.ylabel('Actual')
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
 plt.show()
 
-print("Classification Report:\n", classification_report(y_true, y_pred, target_names=class_names))
+# Classification report
+report = classification_report(y_true, y_pred, target_names=class_names)
+print("Classification Report:")
+print(report)
+
+# -------------------------------
+# Added Prediction Function for a Provided Input Image
+# -------------------------------
+def predict_from_image(input_image, model, transform, class_names):
+    """
+    Predict the class of an input PIL image using the trained model.
+    
+    Args:
+        input_image (PIL.Image.Image): The input image.
+        model (torch.nn.Module): Trained model.
+        transform (torchvision.transforms): Transformations to apply to the image.
+        class_names (list): List of class names.
+    
+    Returns:
+        str: Predicted class label.
+    """
+    model.eval()
+    image = input_image.convert('RGB')
+    image = transform(image)
+    image = image.unsqueeze(0).to(device)
+    with torch.no_grad():
+        outputs = model(image)
+        _, predicted = torch.max(outputs, 1)
+        predicted_class = class_names[predicted.item()]
+    return predicted_class
+
+# Example usage of the prediction function using an input image
+# For demonstration, we'll open an image from disk.
+# In practice, you can provide any PIL Image (for example, obtained from an input widget or camera).
+test_image = Image.open("path/to/your/single/image.jpg")  # Replace with your image file or input method
+predicted_class = predict_from_image(test_image, model, data_transforms['val'], class_names)
+print(f"Predicted class for the provided image: {predicted_class}")
